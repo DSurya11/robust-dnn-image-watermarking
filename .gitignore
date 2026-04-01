@@ -1,0 +1,9 @@
+.venv/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Local training artifacts
+models/checkpoints/*.pth
