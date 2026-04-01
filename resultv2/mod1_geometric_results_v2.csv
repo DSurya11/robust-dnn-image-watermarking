@@ -1,0 +1,10 @@
+Attack,Level,Intensity,PSNR-S
+Rotation,mild,5,6.772053688764572
+Rotation,medium,15,6.7616210877895355
+Rotation,strong,30,6.766152605414391
+Crop,mild,0.95,6.753326952457428
+Crop,medium,0.88,6.71962596476078
+Crop,strong,0.8,6.683570370078087
+Brightness,mild,0.8,6.84192031621933
+Brightness,medium,1.2,6.783045865595341
+Brightness,strong,1.4,6.841694936156273

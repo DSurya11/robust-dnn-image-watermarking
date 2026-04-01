@@ -1,17 +1,24 @@
-"""MOD 2: Lambda tradeoff analysis using fixed forward pass and analytical scaling."""
+"""MOD 2: Lambda tradeoff via fast fine-tuning from trained SimpleISN."""
 
+import argparse
 import csv
-import random
+import copy
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import torch
+from torch.optim import Adam
+from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as T
 from PIL import Image
 
-from load_models import load_all_models
-from run_forward import run_forward, extract_watermark, psnr_val, apply_attack
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from run_forward import apply_attack
 
 
 RESULTS_DIR = Path("results")
@@ -27,56 +34,160 @@ CONFIGS: List[Tuple[float, float]] = [
 ]
 
 
-def load_pairs(num_pairs: int = 8, size: int = 128):
-    files = sorted(DATA_DIR.glob("*.jpg")) + sorted(DATA_DIR.glob("*.png"))
-    files = [f for f in files if "prepare" not in f.name]
-    tfm = T.Compose([T.Resize((size, size)), T.ToTensor()])
-    pairs = []
-    max_pairs = min(num_pairs, max(1, len(files) - 1))
-    for i in range(max_pairs):
-        c = tfm(Image.open(files[i]).convert("RGB"))
-        s = tfm(Image.open(files[(i + 1) % len(files)]).convert("RGB"))
-        pairs.append((c, s))
-    return pairs
+def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
+    mse = torch.nn.functional.mse_loss(a, b).item()
+    return 100.0 if mse < 1e-10 else 10.0 * torch.log10(torch.tensor(1.0 / mse)).item()
+
+
+def resolve_checkpoint(requested: str = "models/checkpoints/phase3_final.pth") -> str | None:
+    candidates = [
+        requested,
+        "models/checkpoints/phase3_final.pth",
+        "models/checkpoints/phase2_best.pth",
+    ]
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def load_isn(device: torch.device, model_path: str):
+    from models.generator import SimpleISN
+
+    isn = SimpleISN().to(device)
+    ckpt = torch.load(model_path, map_location=device)
+    if "isn_state_dict" in ckpt:
+        isn.load_state_dict(ckpt["isn_state_dict"])
+    elif "isn" in ckpt:
+        isn.load_state_dict(ckpt["isn"])
+    elif "generator" in ckpt:
+        isn.load_state_dict(ckpt["generator"])
+    else:
+        raise KeyError("Checkpoint missing ISN weights.")
+    return isn
+
+
+class PairDataset(Dataset):
+    def __init__(self, num_pairs: int = 8, size: int = 128):
+        files = sorted(DATA_DIR.glob("*.jpg")) + sorted(DATA_DIR.glob("*.png"))
+        files = [f for f in files if "prepare" not in f.name]
+        self.tfm = T.Compose([T.Resize((size, size)), T.ToTensor()])
+        self.pairs = []
+        max_pairs = min(num_pairs, max(1, len(files) - 1))
+        for i in range(max_pairs):
+            c = self.tfm(Image.open(files[i]).convert("RGB"))
+            s = self.tfm(Image.open(files[(i + 1) % len(files)]).convert("RGB"))
+            self.pairs.append((c, s))
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        return self.pairs[idx]
+
+
+def get_clean_psnr(model_path: str) -> float:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    isn = load_isn(device, model_path)
+    isn.eval()
+    ds = PairDataset(num_pairs=1, size=128)
+    if len(ds) == 0:
+        return 0.0
+    with torch.no_grad():
+        xh, xs = ds[0]
+        xh = xh.unsqueeze(0).to(device)
+        xs = xs.unsqueeze(0).to(device)
+        xc = isn.embed(xh, xs)
+        xe = isn.extract(xc)
+        return psnr(xe, xs)
+
+
+def evaluate_config(isn, loader, device: torch.device) -> Dict[str, float]:
+    isn.eval()
+    psnr_c_vals: List[float] = []
+    psnr_s_vals: List[float] = []
+    with torch.no_grad():
+        for xh, xs in loader:
+            xh = xh.to(device)
+            xs = xs.to(device)
+            xc = isn.embed(xh, xs)
+            xd = apply_attack(xc, "Gaussian_s10")
+            xe = isn.extract(xd)
+            psnr_c_vals.append(psnr(xc, xh))
+            psnr_s_vals.append(psnr(xe, xs))
+    return {
+        "PSNR-C": float(sum(psnr_c_vals) / max(1, len(psnr_c_vals))),
+        "PSNR-S": float(sum(psnr_s_vals) / max(1, len(psnr_s_vals))),
+    }
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default="models/checkpoints/phase3_final.pth")
+    parser.add_argument("--finetune_epochs", type=int, default=10)
+    args = parser.parse_args()
+
+    model_path = resolve_checkpoint(args.checkpoint)
+    if model_path is None:
+        print("ERROR: Model not trained properly. Run train.py first.")
+        sys.exit(1)
+
+    clean_psnr = get_clean_psnr(model_path)
+    print("=== Running Modification 2 ===")
+    print(f"Model checkpoint: {Path(model_path).name}")
+    print(f"Sanity check PSNR-S: {clean_psnr:.2f} dB")
+    print("Proceeding...")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    embedder, extractor, _disc, feat_ext, enh_pre, _enh_post = load_all_models(device)
-    pairs = load_pairs(num_pairs=8, size=128)
+    base_isn = load_isn(device, model_path)
+    base_state = copy.deepcopy(base_isn.state_dict())
 
-    base_psnr_c_vals = []
-    base_psnr_s_vals = []
-    for carrier, secret in pairs:
-        carrier_t = carrier.unsqueeze(0).to(device)
-        secret_t = secret.unsqueeze(0).to(device)
-        watermarked = run_forward(carrier_t, secret_t, embedder, extractor, feat_ext, enh_pre, device)
-        attacked = apply_attack(watermarked, "gaussian10")
-        extracted = extract_watermark(watermarked, attacked, feat_ext, enh_pre, extractor)
-        base_psnr_c_vals.append(psnr_val(watermarked, carrier_t))
-        base_psnr_s_vals.append(psnr_val(extracted, secret_t))
-
-    base_psnr_c = float(sum(base_psnr_c_vals) / max(1, len(base_psnr_c_vals)))
-    base_psnr_s = float(sum(base_psnr_s_vals) / max(1, len(base_psnr_s_vals)))
+    ds = PairDataset(num_pairs=8, size=128)
+    loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
 
     rows: List[Dict[str, float]] = []
     for lambda_c, lambda_s in CONFIGS:
-        scale_c = lambda_c / (lambda_c + lambda_s)
-        scale_s = lambda_s / (lambda_c + lambda_s)
-        adjusted_c = base_psnr_c * (0.6 + 0.8 * scale_c) + random.gauss(0, 0.15)
-        adjusted_s = base_psnr_s * (0.6 + 0.8 * scale_s) + random.gauss(0, 0.15)
+        isn = load_isn(device, model_path)
+        isn.load_state_dict(base_state)
+        isn.train()
+        opt = Adam(isn.parameters(), lr=2e-4)
+
+        # Fast adaptation from trained weights, not training from scratch.
+        for _ in range(args.finetune_epochs):
+            for xh, xs in loader:
+                xh = xh.to(device)
+                xs = xs.to(device)
+                xc = isn.embed(xh, xs)
+                xe = isn.extract(xc)
+                xd = apply_attack(xc.detach(), "Gaussian_s10")
+                xe_robust = isn.extract(xd)
+
+                l_pre = torch.nn.functional.mse_loss(xc, xh)
+                l_post = torch.nn.functional.mse_loss(xe, xs)
+                l_robust = torch.nn.functional.mse_loss(xe_robust, xs)
+                loss = lambda_c * l_pre + lambda_s * l_post + 0.5 * l_robust
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+
+        metrics = evaluate_config(isn, loader, device)
         rows.append(
             {
                 "lambda_c": lambda_c,
                 "lambda_s": lambda_s,
-                "PSNR-C": adjusted_c,
-                "PSNR-S": adjusted_s,
-                "Combined": adjusted_c + adjusted_s,
+                "PSNR-C": metrics["PSNR-C"],
+                "PSNR-S": metrics["PSNR-S"],
+                "Combined": metrics["PSNR-C"] + metrics["PSNR-S"],
             }
         )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = RESULTS_DIR / "mod2_lambda_results.csv"
+    csv_path = RESULTS_DIR / "mod2_lambda_results_v2.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["lambda_c", "lambda_s", "PSNR-C", "PSNR-S", "Combined"])
         writer.writeheader()
@@ -94,9 +205,9 @@ def main() -> None:
     ax1.set_xlabel("lambda_c")
     ax1.set_ylabel("PSNR-C (dB)", color="tab:blue")
     ax2.set_ylabel("PSNR-S (dB)", color="tab:orange")
-    ax1.set_title("MOD 2: Lambda Tradeoff Curve")
+    ax1.set_title("MOD 2: Lambda Tradeoff Curve (v2)")
     fig.tight_layout()
-    chart_path = RESULTS_DIR / "mod2_lambda_chart.png"
+    chart_path = RESULTS_DIR / "mod2_lambda_chart_v2.png"
     plt.savefig(chart_path, dpi=200)
     plt.close(fig)
 
