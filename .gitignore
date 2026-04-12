@@ -9,3 +9,6 @@ __pycache__/
 models/checkpoints/*.pth
 # Local working folder (do not commit)
 watermark_project/
+
+# Local assets (papers, notes, etc; do not commit)
+local_assets/
