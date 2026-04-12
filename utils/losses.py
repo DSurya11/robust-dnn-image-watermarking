@@ -9,6 +9,40 @@ import torch.nn.functional as F
 EPS = 1e-8
 
 
+def ssim_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """
+    Differentiable SSIM loss implemented in pure PyTorch.
+    """
+    window_size = 11
+    c1, c2 = 0.01**2, 0.03**2
+
+    coords = torch.arange(window_size, dtype=pred.dtype, device=pred.device)
+    coords -= window_size // 2
+    g = torch.exp(-(coords**2) / (2 * 1.5**2))
+    kernel = g.unsqueeze(0) * g.unsqueeze(1)
+    kernel = kernel / kernel.sum()
+    kernel = kernel.expand(pred.shape[1], 1, window_size, window_size)
+
+    pad = window_size // 2
+
+    mu1 = F.conv2d(pred, kernel, padding=pad, groups=pred.shape[1])
+    mu2 = F.conv2d(target, kernel, padding=pad, groups=pred.shape[1])
+
+    mu1_sq = mu1**2
+    mu2_sq = mu2**2
+    mu12 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(pred * pred, kernel, padding=pad, groups=pred.shape[1]) - mu1_sq
+    sigma2_sq = F.conv2d(target * target, kernel, padding=pad, groups=pred.shape[1]) - mu2_sq
+    sigma12 = F.conv2d(pred * target, kernel, padding=pad, groups=pred.shape[1]) - mu12
+
+    ssim_map = ((2 * mu12 + c1) * (2 * sigma12 + c2)) / (
+        (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+    )
+
+    return 1.0 - ssim_map.mean()
+
+
 def _haar_ll(x: torch.Tensor) -> torch.Tensor:
     """Returns the LL sub-band from a single-level 2D Haar DWT."""
     if x.dim() != 4:

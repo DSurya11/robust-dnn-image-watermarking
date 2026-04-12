@@ -145,3 +145,20 @@ def apply_random_attack(image_tensor: Tensor) -> Tensor:
     attack_fn = random.choice(attacks)
     attacked = attack_fn(image_tensor)
     return attacked.clamp(0.0, 1.0)
+
+
+def training_augment(image_tensor: Tensor) -> Tensor:
+    """
+    Applies random augmentation during training to reduce overfitting.
+    This is our Modification 4: addressing the train/val gap.
+    """
+    aug_type = random.choice(["flip", "color_jitter", "none"])
+
+    if aug_type == "flip":
+        return torch.flip(image_tensor, dims=[3])
+
+    if aug_type == "color_jitter":
+        factor = random.uniform(0.9, 1.1)
+        return torch.clamp(image_tensor * factor, 0, 1)
+
+    return image_tensor

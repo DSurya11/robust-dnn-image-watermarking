@@ -7,3 +7,5 @@ __pycache__/
 
 # Local training artifacts
 models/checkpoints/*.pth
+# Local working folder (do not commit)
+watermark_project/

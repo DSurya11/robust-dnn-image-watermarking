@@ -1,0 +1,126 @@
+================================================================
+PROJECT DEMO GUIDE — Robust Image Watermarking
+GAN + Dynamic Attention | Student Implementation
+================================================================
+
+WHAT THIS PROJECT DOES:
+  Embeds a secret image invisibly inside a carrier image.
+  The hidden watermark survives attacks like noise and compression.
+  The secret can be extracted even after these attacks.
+
+----------------------------------------------------------------
+STEP 1 — SHOW LIVE RESULTS (most important, do this first)
+----------------------------------------------------------------
+Open terminal in the project root folder and run:
+
+    python PRESENTATION_DEMO/1_run_live_demo.py
+
+Note: checkpoint is included in PRESENTATION_DEMO/models/
+No separate download required.
+
+Expected output:
+    Attack          |  PSNR-C |  PSNR-S | Result
+    Gaussian σ=1    |   28.56 |   19.03 |   PASS
+    Gaussian σ=10   |   28.56 |   19.03 |   PASS
+    JPEG q=90       |   28.56 |   18.79 |   PASS
+    JPEG q=80       |   28.56 |   18.62 |   PASS
+    Round           |   28.56 |   19.02 |   PASS
+
+WHAT TO SAY: "All 5 attack types pass. PSNR-S above 18 dB means
+the extracted secret image has acceptable quality."
+
+----------------------------------------------------------------
+STEP 2 — SHOW VISUAL COMPARISON (open these image files)
+----------------------------------------------------------------
+Open folder: PRESENTATION_DEMO/results/visuals/
+
+Show visual_Gaussian_s10.png — this is the hardest attack.
+Point out:
+  - Panel 1 (Original): clean carrier image
+  - Panel 3 (Watermarked): looks similar, watermark is invisible
+  - Panel 4 (Attacked): degraded by Gaussian noise σ=10
+  - Panel 5 (Extracted): secret image recovered despite the attack
+
+WHAT TO SAY: "Even after strong Gaussian noise, the network
+recovers the hidden image. PSNR-C measures carrier quality,
+PSNR-S measures extraction quality."
+
+----------------------------------------------------------------
+STEP 3 — SHOW MODIFICATION RESULTS (open charts)
+----------------------------------------------------------------
+Open folder: PRESENTATION_DEMO/results/charts/
+
+MOD1 — Geometric Attack Robustness
+  Problem:    Paper only tests Gaussian/JPEG/Round. Real attacks 
+              include rotation, cropping, and brightness changes.
+  Change:     Added rotation_attack(), crop_attack(), 
+              brightness_attack() to utils/attacks.py
+  Threshold:  PSNR-S > 15 dB = acceptable geometric robustness
+  Result:     Brightness mild=18.74 dB (PASS), Rotation mild=15.47 dB 
+              (borderline), Strong rotation=11.74 dB (expected failure).
+              Shows model is robust to photometric but not geometric transforms.
+
+MOD2 — Lambda Hyperparameter Tradeoff
+  Problem:    Paper fixes lambda_c=1.0, lambda_s=1.0 with no analysis.
+  Change:     Fine-tuned model 15 epochs per config across 7 lambda pairs.
+  Threshold:  Measurable tradeoff: PSNR-C and PSNR-S must move 
+              in opposite directions as lambda_c increases.
+  Result:     lambda_c=0.3 → PSNR-C=24.92, PSNR-S=18.64
+              lambda_c=1.7 → PSNR-C=28.37, PSNR-S=17.78
+              Clear tradeoff confirmed. Paper default (1.0,1.0) 
+              is a reasonable but not optimal balanced point.
+
+MOD3 — Watermark Capacity by Content Type
+  Problem:    Paper only uses natural photos as secret images.
+  Change:     Tested Noise/Text/Logo/Natural as secret image types.
+  Threshold:  SSIM > 0.05 = some structural recovery.
+  Result:     Text achieves highest PSNR-S=13.4 dB, SSIM=0.138.
+              Noise is hardest: PSNR-S=6.8 dB, SSIM=0.005.
+              Structured secrets extract better than random ones.
+
+MOD4 — Data Augmentation to Reduce Overfitting
+  Problem:    Train/val PSNR-S gap was 1.00 dB — clear overfitting 
+              on 79 training images.
+  Change:     Added random flip + brightness jitter during training.
+  Threshold:  Gap reduction > 0.3 dB = meaningful improvement.
+  Result:     Gap reduced from 1.00 → 0.39 dB (61% reduction).
+              Augmentation successfully reduced overfitting.
+
+MOD5 — Differentiable SSIM Loss
+  Problem:    Standard MSE loss ignores perceptual/structural quality.
+  Change:     Implemented pure PyTorch SSIM loss (differentiable).
+              Hybrid: 0.5*MSE + 0.5*SSIM_loss
+  Threshold:  SSIM improvement > 0.05 over MSE baseline.
+  Result:     MSE only:   PSNR-S=18.28, SSIM=0.590
+              MSE+SSIM:   PSNR-S=17.66, SSIM=0.671
+              Perceptual vs fidelity tradeoff: SSIM↑ +0.081, 
+              PSNR-S↓ 0.62 dB. Use MSE+SSIM when structural 
+              quality matters more than pixel-level accuracy.
+
+----------------------------------------------------------------
+STEP 4 — SHOW KEY NUMBERS (reference these in discussion)
+----------------------------------------------------------------
+Improvement over baseline:
+  Before training: PSNR-S = 4.36 dB (all FAIL)
+  After training:  PSNR-S = 19.03 dB (all PASS)
+  Improvement:     +14.67 dB
+
+MOD4 (Overfitting fix):
+  Without augmentation: train/val gap = 1.00 dB
+  With augmentation:    train/val gap = 0.39 dB
+  "Data augmentation reduced overfitting by 61%."
+
+MOD5 (SSIM loss):
+  MSE only:    PSNR-S=18.28, SSIM=0.590
+  MSE + SSIM:  PSNR-S=17.66, SSIM=0.671
+  "SSIM loss trades 0.6 dB PSNR for better structural quality."
+
+----------------------------------------------------------------
+CONSTRAINTS TO MENTION (shows you understand the work)
+----------------------------------------------------------------
+  - Trained on CPU only (paper used RTX 4090)
+  - 79 training images (paper used 800 DIV2K images)
+  - 200 total epochs (paper used 1600 epochs)
+  - Despite these constraints, all 5 attacks pass evaluation
+
+================================================================

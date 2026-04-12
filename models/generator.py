@@ -10,7 +10,9 @@ class SimpleISN(nn.Module):
         self.encoder = nn.Sequential(
             nn.Conv2d(6, 64, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, 3, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 32, 3, padding=1),
             nn.ReLU(),
@@ -20,7 +22,11 @@ class SimpleISN(nn.Module):
         self.decoder = nn.Sequential(
             nn.Conv2d(3, 64, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, 3, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 32, 3, padding=1),
             nn.ReLU(),

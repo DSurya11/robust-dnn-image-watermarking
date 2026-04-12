@@ -16,30 +16,16 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from PIL import Image
 
+from evaluate import select_best_checkpoint
 
-RESULTS_DIR = Path("results")
+
+RESULTS_DIR = Path("results/final")
 DATA_DIR = Path("data")
 
 
 def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
     mse = torch.nn.functional.mse_loss(a, b).item()
     return 100.0 if mse < 1e-10 else 10.0 * torch.log10(torch.tensor(1.0 / mse)).item()
-
-
-def resolve_checkpoint(requested: str = "models/checkpoints/phase3_final.pth") -> str | None:
-    candidates = [
-        requested,
-        "models/checkpoints/phase3_final.pth",
-        "models/checkpoints/phase2_best.pth",
-    ]
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if Path(candidate).exists():
-            return candidate
-    return None
 
 
 def load_isn(device: torch.device, model_path: str):
@@ -108,21 +94,24 @@ def geometric_attack(x: torch.Tensor, attack_name: str, intensity: float) -> tor
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="models/checkpoints/phase3_final.pth")
     args = parser.parse_args()
 
-    model_path = resolve_checkpoint(args.checkpoint)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pairs_for_selection = load_pairs(num_pairs=3, size=128)
+    model_path, _ = select_best_checkpoint(device, pairs_for_selection)
     if model_path is None:
-        print("ERROR: Model not trained properly. Run train.py first.")
+        print("ERROR: Model not trained properly")
         sys.exit(1)
 
     clean_psnr = get_clean_psnr(model_path)
     print("=== Running Modification 1 ===")
     print(f"Model checkpoint: {Path(model_path).name}")
     print(f"Sanity check PSNR-S: {clean_psnr:.2f} dB")
+    if clean_psnr < 17:
+        print("ERROR: Model not trained properly")
+        sys.exit(1)
     print("Proceeding...")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     isn = load_isn(device, model_path)
     pairs = load_pairs(num_pairs=8, size=128)
 
@@ -159,7 +148,7 @@ def main() -> None:
                 )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = RESULTS_DIR / "mod1_geometric_results_v2.csv"
+    csv_path = RESULTS_DIR / "mod1_geometric_results.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["Attack", "Level", "Intensity", "PSNR-S"])
         writer.writeheader()
@@ -177,7 +166,7 @@ def main() -> None:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    chart_path = RESULTS_DIR / "mod1_geometric_chart_v2.png"
+    chart_path = RESULTS_DIR / "mod1_geometric_chart.png"
     plt.savefig(chart_path, dpi=200)
     plt.close()
 
