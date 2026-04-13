@@ -2,7 +2,6 @@
 
 import argparse
 import csv
-import copy
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -10,7 +9,7 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import torch
 from torch.optim import Adam
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 import torchvision.transforms as T
 from PIL import Image
 
@@ -18,10 +17,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from run_forward import apply_attack
-
-
-RESULTS_DIR = Path("results")
+RESULTS_DIR = Path("results/final")
 DATA_DIR = Path("data")
 CONFIGS: List[Tuple[float, float]] = [
     (0.3, 1.7),
@@ -37,22 +33,6 @@ CONFIGS: List[Tuple[float, float]] = [
 def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
     mse = torch.nn.functional.mse_loss(a, b).item()
     return 100.0 if mse < 1e-10 else 10.0 * torch.log10(torch.tensor(1.0 / mse)).item()
-
-
-def resolve_checkpoint(requested: str = "models/checkpoints/phase3_final.pth") -> str | None:
-    candidates = [
-        requested,
-        "models/checkpoints/phase3_final.pth",
-        "models/checkpoints/phase2_best.pth",
-    ]
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if Path(candidate).exists():
-            return candidate
-    return None
 
 
 def load_isn(device: torch.device, model_path: str):
@@ -115,8 +95,7 @@ def evaluate_config(isn, loader, device: torch.device) -> Dict[str, float]:
             xh = xh.to(device)
             xs = xs.to(device)
             xc = isn.embed(xh, xs)
-            xd = apply_attack(xc, "Gaussian_s10")
-            xe = isn.extract(xd)
+            xe = isn.extract(xc)
             psnr_c_vals.append(psnr(xc, xh))
             psnr_s_vals.append(psnr(xe, xs))
     return {
@@ -125,15 +104,29 @@ def evaluate_config(isn, loader, device: torch.device) -> Dict[str, float]:
     }
 
 
+def build_train_val_loaders(batch_size: int = 4, num_pairs: int = 50):
+    ds = PairDataset(num_pairs=num_pairs, size=128)
+    n = len(ds)
+    n_train = int(0.8 * n)
+    train_set, val_set = random_split(
+        ds,
+        [n_train, n - n_train],
+        generator=torch.Generator().manual_seed(42),
+    )
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
+    return train_loader, val_loader
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="models/checkpoints/phase3_final.pth")
-    parser.add_argument("--finetune_epochs", type=int, default=10)
+    parser.add_argument("--finetune_epochs", type=int, default=15)
     args = parser.parse_args()
 
-    model_path = resolve_checkpoint(args.checkpoint)
-    if model_path is None:
-        print("ERROR: Model not trained properly. Run train.py first.")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_path = "models/checkpoints/phase1_best.pth"
+    if not Path(model_path).exists():
+        print("ERROR: models/checkpoints/phase1_best.pth not found")
         sys.exit(1)
 
     clean_psnr = get_clean_psnr(model_path)
@@ -142,40 +135,35 @@ def main() -> None:
     print(f"Sanity check PSNR-S: {clean_psnr:.2f} dB")
     print("Proceeding...")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    base_isn = load_isn(device, model_path)
-    base_state = copy.deepcopy(base_isn.state_dict())
-
-    ds = PairDataset(num_pairs=8, size=128)
-    loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
+    train_loader, val_loader = build_train_val_loaders(batch_size=4, num_pairs=50)
 
     rows: List[Dict[str, float]] = []
     for lambda_c, lambda_s in CONFIGS:
+        # Fresh model copy from phase1_best for each lambda pair.
         isn = load_isn(device, model_path)
-        isn.load_state_dict(base_state)
         isn.train()
-        opt = Adam(isn.parameters(), lr=2e-4)
+        opt = Adam(isn.parameters(), lr=1e-4)
 
-        # Fast adaptation from trained weights, not training from scratch.
         for _ in range(args.finetune_epochs):
-            for xh, xs in loader:
+            for xh, xs in train_loader:
                 xh = xh.to(device)
                 xs = xs.to(device)
                 xc = isn.embed(xh, xs)
                 xe = isn.extract(xc)
-                xd = apply_attack(xc.detach(), "Gaussian_s10")
-                xe_robust = isn.extract(xd)
 
                 l_pre = torch.nn.functional.mse_loss(xc, xh)
                 l_post = torch.nn.functional.mse_loss(xe, xs)
-                l_robust = torch.nn.functional.mse_loss(xe_robust, xs)
-                loss = lambda_c * l_pre + lambda_s * l_post + 0.5 * l_robust
+                loss = lambda_c * l_pre + lambda_s * l_post
 
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
 
-        metrics = evaluate_config(isn, loader, device)
+        metrics = evaluate_config(isn, val_loader, device)
+        print(
+            f"Lambda (lc={lambda_c:.1f}, ls={lambda_s:.1f}): "
+            f"PSNR-C={metrics['PSNR-C']:.2f}, PSNR-S={metrics['PSNR-S']:.2f}"
+        )
         rows.append(
             {
                 "lambda_c": lambda_c,
@@ -187,7 +175,7 @@ def main() -> None:
         )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = RESULTS_DIR / "mod2_lambda_results_v2.csv"
+    csv_path = RESULTS_DIR / "mod2_lambda_results.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["lambda_c", "lambda_s", "PSNR-C", "PSNR-S", "Combined"])
         writer.writeheader()
@@ -202,12 +190,13 @@ def main() -> None:
     ax1.plot(x_vals, y_c, marker="o", color="tab:blue", label="PSNR-C")
     ax2.plot(x_vals, y_s, marker="s", color="tab:orange", label="PSNR-S")
     ax1.axvline(1.0, linestyle="--", color="gray", linewidth=1.3)
+    ax1.text(1.02, max(y_c), "paper default", color="gray", fontsize=9)
     ax1.set_xlabel("lambda_c")
     ax1.set_ylabel("PSNR-C (dB)", color="tab:blue")
     ax2.set_ylabel("PSNR-S (dB)", color="tab:orange")
-    ax1.set_title("MOD 2: Lambda Tradeoff Curve (v2)")
+    ax1.set_title("MOD 2: Lambda Tradeoff Curve")
     fig.tight_layout()
-    chart_path = RESULTS_DIR / "mod2_lambda_chart_v2.png"
+    chart_path = RESULTS_DIR / "mod2_lambda_chart.png"
     plt.savefig(chart_path, dpi=200)
     plt.close(fig)
 

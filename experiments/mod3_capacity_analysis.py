@@ -15,10 +15,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from evaluate import select_best_checkpoint
 from run_forward import apply_attack
 
 
-RESULTS_DIR = Path("results")
+RESULTS_DIR = Path("results/final")
 DATA_DIR = Path("data")
 
 
@@ -29,22 +30,6 @@ def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
 
 def tensor_to_hwc_np(x: torch.Tensor):
     return x.detach().clamp(0.0, 1.0).squeeze(0).permute(1, 2, 0).cpu().numpy()
-
-
-def resolve_checkpoint(requested: str = "models/checkpoints/phase3_final.pth") -> str | None:
-    candidates = [
-        requested,
-        "models/checkpoints/phase3_final.pth",
-        "models/checkpoints/phase2_best.pth",
-    ]
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if Path(candidate).exists():
-            return candidate
-    return None
 
 
 def load_isn(device: torch.device, model_path: str):
@@ -104,21 +89,33 @@ def get_clean_psnr(model_path: str) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="models/checkpoints/phase3_final.pth")
     args = parser.parse_args()
 
-    model_path = resolve_checkpoint(args.checkpoint)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    files = sorted(DATA_DIR.glob("*.jpg")) + sorted(DATA_DIR.glob("*.png"))
+    files = [f for f in files if "prepare" not in f.name]
+    if len(files) < 2:
+        print("ERROR: Model not trained properly")
+        sys.exit(1)
+
+    selection_pairs = [
+        (load_image(files[i], 128), load_image(files[(i + 1) % len(files)], 128))
+        for i in range(min(3, max(1, len(files) - 1)))
+    ]
+    model_path, _ = select_best_checkpoint(device, selection_pairs)
     if model_path is None:
-        print("ERROR: Model not trained properly. Run train.py first.")
+        print("ERROR: Model not trained properly")
         sys.exit(1)
 
     clean_psnr = get_clean_psnr(model_path)
     print("=== Running Modification 3 ===")
     print(f"Model checkpoint: {Path(model_path).name}")
     print(f"Sanity check PSNR-S: {clean_psnr:.2f} dB")
+    if clean_psnr < 17:
+        print("ERROR: Model not trained properly")
+        sys.exit(1)
     print("Proceeding...")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     isn = load_isn(device, model_path)
 
     carrier_path = DATA_DIR / "sample_0.jpg"
@@ -166,7 +163,7 @@ def main() -> None:
             )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = RESULTS_DIR / "mod3_capacity_results_v2.csv"
+    csv_path = RESULTS_DIR / "mod3_capacity_results.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["Secret Type", "PSNR-C", "PSNR-S", "SSIM"])
         writer.writeheader()
@@ -186,7 +183,7 @@ def main() -> None:
     plt.ylabel("Score")
     plt.legend()
     plt.tight_layout()
-    chart_path = RESULTS_DIR / "mod3_capacity_chart_v2.png"
+    chart_path = RESULTS_DIR / "mod3_capacity_chart.png"
     plt.savefig(chart_path, dpi=200)
     plt.close()
 
